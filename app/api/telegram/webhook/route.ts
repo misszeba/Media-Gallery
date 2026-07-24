@@ -9,20 +9,32 @@ export async function POST(request: NextRequest) {
     const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET
 
     if (!botToken || !webhookSecret) {
-      return NextResponse.json({ error: "Telegram not configured" }, { status: 500 })
+      console.error("[v0] Telegram credentials missing")
+      return NextResponse.json(
+        { error: "Telegram not configured" },
+        { status: 500 }
+      )
     }
 
     const body = await request.text()
     const signature = request.headers.get("x-telegram-bot-api-secret-token")
 
     if (signature !== webhookSecret) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+      console.error("[v0] Invalid webhook signature")
+      return NextResponse.json(
+        { error: "Unauthorized" },
+        { status: 401 }
+      )
     }
 
     const update = JSON.parse(body)
     const message = update.message
-    if (!message) return NextResponse.json({ ok: true })
 
+    if (!message) {
+      return NextResponse.json({ ok: true })
+    }
+
+    // মিডিয়া টাইপ এবং File ID ডিটেক্ট করা হচ্ছে (Photo, Video, GIF, Document)
     let fileId = ""
     let mediaType: "photo" | "video" | "gif" = "photo"
 
@@ -46,47 +58,59 @@ export async function POST(request: NextRequest) {
     }
 
     const mediaCaption = parseMediaCaption(message.caption || "")
-    if (!mediaCaption) return NextResponse.json({ ok: true })
+    if (!mediaCaption) {
+      console.log("[v0] Invalid caption format, skipping")
+      return NextResponse.json({ ok: true })
+    }
 
-    let filePath = ""
+    let filePath: string
     try {
       filePath = await getTelegramFilePath(fileId, botToken)
     } catch (error) {
       console.error("[v0] Failed to get file path:", error)
+      return NextResponse.json({ ok: true })
     }
 
-    // ডাটাবেস কানেকশন
+    // ডাটাবেস কানেকশন করা হচ্ছে (আগের JSON ফাইল রিডের পরিবর্তে)
     await connectToDatabase()
 
     const categoryName = mediaCaption.category ? mediaCaption.category.trim() : ""
 
-    // নতুন ক্যাটাগরি হলে ডাটাবেসে যুক্ত করা
+    // যদি কাস্টম ক্যাটাগরি দেওয়া থাকে, তবে ডাটাবেসে যুক্ত করা হবে
     if (categoryName) {
       await CategoryModel.findOneAndUpdate(
         { name: categoryName },
         { name: categoryName },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: "after" }
       )
     }
 
-    // মিডিয়া সেভ করা (আগে থেকে থাকলে স্কিপ করবে)
-    await MediaModel.findOneAndUpdate(
+    const newMediaId = `telegram-${fileId.substring(0, 20)}`
+
+    // মিডিয়া ডাটাবেসে সেভ করা (আগে থেকে থাকলে স্কিপ বা আপডেট করবে)
+    const savedMedia = await MediaModel.findOneAndUpdate(
       { telegramFileId: fileId },
       {
-        title: mediaCaption.title,
-        location: mediaCaption.location,
-        year: mediaCaption.year,
-        category: categoryName,
-        type: mediaType,
-        src: `/api/media/${fileId}`,
-        ratio: mediaType === "photo" ? 0.75 : 1.33,
-        telegramFileId: fileId,
-        telegramFilePath: filePath,
+        $set: {
+          id: newMediaId,
+          title: mediaCaption.title,
+          location: mediaCaption.location,
+          year: mediaCaption.year,
+          category: categoryName, // খালি রাখলে শুধুমাত্র "All" এ ফিল্টার হবে
+          type: mediaType,
+          src: `/api/media/${fileId}`,
+          ratio: mediaType === "photo" ? 0.75 : 1.33,
+          telegramFileId: fileId,
+          telegramFilePath: filePath,
+        }
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: "after" }
     )
 
-    console.log("[v0] Media saved to MongoDB:", fileId)
+    if (savedMedia) {
+      console.log("[v0] Media added to gallery MongoDB:", newMediaId)
+    }
+
     return NextResponse.json({ ok: true })
   } catch (error) {
     console.error("[v0] Webhook error:", error)
