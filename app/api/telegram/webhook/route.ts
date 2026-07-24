@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { parseMediaCaption, getTelegramFilePath } from "@/lib/telegram"
 import { connectToDatabase } from "@/lib/db"
 import { MediaModel, CategoryModel } from "@/lib/models"
+import { processTelegramUpdate } from "@/bot/telegram-bot"
 
 export async function POST(request: NextRequest) {
   try {
@@ -28,13 +29,16 @@ export async function POST(request: NextRequest) {
     }
 
     const update = JSON.parse(body)
-    const message = update.message
+    
+    // ১. টেলিগ্রাম বটের সব কমান্ড (/start, বাটন ক্লিক, মেসেজ উত্তর) এখানে ট্রিগার হবে
+    await processTelegramUpdate(update)
 
+    const message = update.message
     if (!message) {
       return NextResponse.json({ ok: true })
     }
 
-    // মিডিয়া টাইপ এবং File ID ডিটেক্ট করা হচ্ছে (Photo, Video, GIF, Document)
+    // ২. মিডিয়া টাইপ এবং File ID ডিটেক্ট করা হচ্ছে (Photo, Video, GIF, Document)
     let fileId = ""
     let mediaType: "photo" | "video" | "gif" = "photo"
 
@@ -71,12 +75,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    // ডাটাবেস কানেকশন করা হচ্ছে (আগের JSON ফাইল রিডের পরিবর্তে)
+    // ৩. ডাটাবেস কানেকশন ও মিডিয়া সেভ করা
     await connectToDatabase()
 
     const categoryName = mediaCaption.category ? mediaCaption.category.trim() : ""
 
-    // যদি কাস্টম ক্যাটাগরি দেওয়া থাকে, তবে ডাটাবেসে যুক্ত করা হবে
     if (categoryName) {
       await CategoryModel.findOneAndUpdate(
         { name: categoryName },
@@ -87,7 +90,6 @@ export async function POST(request: NextRequest) {
 
     const newMediaId = `telegram-${fileId.substring(0, 20)}`
 
-    // মিডিয়া ডাটাবেসে সেভ করা (আগে থেকে থাকলে স্কিপ বা আপডেট করবে)
     const savedMedia = await MediaModel.findOneAndUpdate(
       { telegramFileId: fileId },
       {
