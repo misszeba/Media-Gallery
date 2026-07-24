@@ -1,21 +1,21 @@
 import dotenv from "dotenv"
-import fs from "fs"
 import path from "path"
 import https from "https"
 import http from "http"
-import mongoose from "mongoose" // MongoDB কানেকশনের জন্য Mongoose যুক্ত করা হয়েছে
+import { connectToDatabase } from "@/lib/db"
+import { MediaModel, CategoryModel } from "@/lib/models"
 
 const envLocalPath = path.resolve(process.cwd(), ".env.local")
 const envPath = path.resolve(process.cwd(), ".env")
 
-if (fs.existsSync(envLocalPath)) {
+try {
   dotenv.config({ path: envLocalPath })
-  console.log("📁 [Env] Loaded environment variables from .env.local")
-} else if (fs.existsSync(envPath)) {
-  dotenv.config({ path: envPath })
-  console.log("📁 [Env] Loaded environment variables from .env")
-} else {
-  dotenv.config()
+} catch {
+  try {
+    dotenv.config({ path: envPath })
+  } catch {
+    dotenv.config()
+  }
 }
 
 interface TelegramUpdate {
@@ -52,7 +52,6 @@ const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || "dev-secret"
 
 if (!BOT_TOKEN) {
   console.error("❌ TELEGRAM_BOT_TOKEN environment variable is not set")
-  process.exit(1)
 }
 
 const API_URL = `https://api.telegram.org/bot${BOT_TOKEN}`
@@ -70,74 +69,35 @@ interface PendingMedia {
 const pendingMediaMap = new Map<string, PendingMedia>()
 const userStates = new Map<number, { action: string; pendingId: string }>()
 
-// ============================================================================
-// MongoDB Setup & Schema Configuration for Bot
-// ============================================================================
-const CategorySchema = new mongoose.Schema({ name: String })
-const MediaSchema = new mongoose.Schema({ category: String })
-
-const CategoryModel = mongoose.models.Category || mongoose.model("Category", CategorySchema)
-const MediaModel = mongoose.models.Media || mongoose.model("Media", MediaSchema)
-
-async function connectBotDB(): Promise<boolean> {
-  if (mongoose.connection.readyState === 0) {
-    if (!process.env.MONGODB_URI) {
-      console.error("❌ MONGODB_URI missing in environment variables!")
-      return false
-    }
-    try {
-      await mongoose.connect(process.env.MONGODB_URI)
-      return true
-    } catch (e) {
-      console.error("❌ Failed to connect to MongoDB:", e)
-      return false
-    }
-  }
-  return true
-}
-
-/**
- * ডাটাবেস থেকে ক্যাটাগরি লিস্ট পড়ে আনার ফাংশন
- */
-async function getCategories(): Promise<string[]> {
+async function getGalleryCategories(): Promise<string[]> {
   try {
-    await connectBotDB()
+    await connectToDatabase()
     const cats = await CategoryModel.find().select("name -_id").lean()
-    
-    // ডাটাবেসে কোনো ক্যাটাগরি না থাকলে ডিফল্টগুলো তৈরি করে দেবে
-    if (cats.length === 0) {
+    if (!cats || cats.length === 0) {
       const defaultCats = ["Landscapes", "Architecture", "Portraits", "Street"]
       for (const name of defaultCats) {
-        await CategoryModel.findOneAndUpdate({ name }, { name }, { upsert: true })
+        await CategoryModel.findOneAndUpdate({ name }, { name }, { upsert: true, returnDocument: "after" })
       }
       return defaultCats
     }
     return cats.map((c: any) => c.name)
-  } catch (e) {
-    console.error("Error fetching categories from MongoDB:", e)
+  } catch {
     return ["Landscapes", "Architecture", "Portraits", "Street"]
   }
 }
 
-/**
- * ডাটাবেস থেকে ক্যাটাগরি ডিলিট করা এবং ঐ ক্যাটাগরির মিডিয়াগুলোকে "All" এ পাঠানো
- */
-async function deleteCategory(catToDelete: string): Promise<boolean> {
+async function deleteCategoryFromDb(catToDelete: string): Promise<boolean> {
   try {
-    await connectBotDB()
+    await connectToDatabase()
     await CategoryModel.deleteOne({ name: catToDelete })
-    // ডিলিট করা ক্যাটাগরির মিডিয়াগুলোকে "All" ট্যাবে দেখানোর জন্য ক্যাটাগরি ফাঁকা করে দেওয়া হচ্ছে
     await MediaModel.updateMany({ category: catToDelete }, { $set: { category: "" } })
     return true
   } catch (e) {
-    console.error("Error deleting category from MongoDB:", e)
+    console.error("Error deleting category:", e)
     return false
   }
 }
 
-// ============================================================================
-// Telegram Request & Helper Functions
-// ============================================================================
 async function makeRequest(
   url: string,
   method: string = "GET",
@@ -181,7 +141,7 @@ async function sendMessage(
 }
 
 async function sendCategoryButtons(chatId: number, pendingId: string, title: string): Promise<void> {
-  const categories = await getCategories()
+  const categories = await getGalleryCategories()
   const keyboard: Array<Array<{ text: string; callback_data: string }>> = []
 
   for (let i = 0; i < categories.length; i += 2) {
@@ -210,7 +170,7 @@ async function sendCategoryButtons(chatId: number, pendingId: string, title: str
 }
 
 async function sendDeleteCategoryMenu(chatId: number, messageId?: number): Promise<void> {
-  const categories = await getCategories()
+  const categories = await getGalleryCategories()
 
   if (categories.length === 0) {
     await sendMessage(chatId, "ℹ️ No categories available to delete.")
@@ -346,7 +306,7 @@ async function handleCallbackQuery(callbackQuery: any): Promise<void> {
 
   if (data.startsWith("del_cat:")) {
     const catToDelete = data.replace("del_cat:", "")
-    const success = await deleteCategory(catToDelete)
+    const success = await deleteCategoryFromDb(catToDelete)
     if (success) {
       await makeRequest(`${API_URL}/editMessageText`, "POST", {
         chat_id: message.chat.id,
@@ -410,6 +370,14 @@ async function handleText(update: TelegramUpdate): Promise<void> {
     const state = userStates.get(chat.id)!
     if (state.action === "waiting_new_category") {
       const newCategory = text.trim()
+      
+      try {
+        await connectToDatabase()
+        await CategoryModel.findOneAndUpdate({ name: newCategory }, { name: newCategory }, { upsert: true, returnDocument: "after" })
+      } catch (e) {
+        console.error("Failed to add new category to DB:", e)
+      }
+
       const pending = pendingMediaMap.get(state.pendingId)
 
       if (pending) {
@@ -440,7 +408,7 @@ async function handleText(update: TelegramUpdate): Promise<void> {
   }
 }
 
-async function handleUpdate(update: TelegramUpdate): Promise<void> {
+export async function processTelegramUpdate(update: TelegramUpdate): Promise<void> {
   try {
     if (update.callback_query) {
       await handleCallbackQuery(update.callback_query)
@@ -458,48 +426,3 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
     console.error("Error handling update:", error)
   }
 }
-
-async function pollUpdates(offset: number = 0): Promise<void> {
-  try {
-    const response = await makeRequest(`${API_URL}/getUpdates?offset=${offset}&timeout=30`)
-    if (!response.ok) return
-
-    const updates = (response.result as TelegramUpdate[]) || []
-    if (updates.length > 0) {
-      for (const update of updates) {
-        await handleUpdate(update)
-      }
-      const nextOffset = updates[updates.length - 1].update_id + 1
-      await pollUpdates(nextOffset)
-    } else {
-      await pollUpdates(offset)
-    }
-  } catch (error) {
-    console.error("Polling error:", error)
-    setTimeout(() => pollUpdates(offset), 5000)
-  }
-}
-
-async function deleteWebhook(): Promise<void> {
-  console.log("[Bot] Removing webhook & dropping old pending updates...")
-  const response = await makeRequest(`${API_URL}/deleteWebhook`, "POST", { drop_pending_updates: true })
-  if (response.ok) console.log("✅ Webhook removed & queue cleared successfully")
-}
-
-async function getMe(): Promise<void> {
-  const response = await makeRequest(`${API_URL}/getMe`)
-  if (response.ok && response.result) {
-    const me = response.result as { username?: string }
-    console.log(`✅ Bot connected: @${me.username}`)
-  }
-}
-
-async function main(): Promise<void> {
-  console.log("🤖 Aperture Telegram Bot starting...\n")
-  await getMe()
-  await deleteWebhook()
-  console.log("[Bot] Polling for updates...")
-  await pollUpdates()
-}
-
-main().catch(console.error)
