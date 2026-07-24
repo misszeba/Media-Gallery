@@ -17,7 +17,6 @@ export function MediaGallery() {
   const [viewType, setViewType] = useState<ViewType>("grid")
   const [isLoading, setIsLoading] = useState<boolean>(true)
 
-  // পেজ লোড হলে ডাটাবেস (MongoDB Atlas) থেকে রিয়েল-টাইম ডেটা নিয়ে আসবে
   useEffect(() => {
     setIsLoading(true)
     fetch("/api/gallery")
@@ -131,7 +130,6 @@ export function MediaGallery() {
             </p>
           </div>
 
-          {/* লোডিং অবস্থা হ্যান্ডেল করা */}
           {isLoading ? (
             <div className="flex h-64 w-full items-center justify-center">
               <p className="text-sm font-semibold uppercase tracking-widest text-muted-foreground animate-pulse">
@@ -147,7 +145,7 @@ export function MediaGallery() {
             </div>
           ) : (
             <>
-              {/* Grid view - mb-4 যুক্ত করা আছে যেন Top-Bottom এবং Left-Right গ্যাপ ১০০% সমান থাকে */}
+              {/* Grid view - mb-4 যুক্ত করা হয়েছে যেন Top-Bottom এবং Left-Right গ্যাপ ১০০% সমান থাকে */}
               {viewType === "grid" && (
                 <div className="[column-fill:_balance] gap-4 sm:columns-2 lg:columns-3">
                   {visibleItems.map((item) => {
